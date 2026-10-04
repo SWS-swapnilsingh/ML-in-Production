@@ -1,15 +1,40 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from pathlib import Path
 import joblib
 import pandas as pd
 from html import escape
-from urllib.parse import parse_qs
+from pydantic import BaseModel, Field
 
 app = FastAPI()
 
 MODEL_PATH = Path(__file__).resolve().parent / "model.pkl"
 FEATURE_COLUMNS = ["pclass", "age", "sibsp", "parch", "fare", "sex", "embarked"]
+
+
+class PassengerInput(BaseModel):
+    model_config = {
+        "json_schema_extra": {
+            "examples": [{
+                "pclass": 3,
+                "age": 30,
+                "sibsp": 0,
+                "parch": 0,
+                "fare": 32.2,
+                "sex": "female",
+                "embarked": "S",
+            }]
+        }
+    }
+
+    pclass: int = Field(ge=1, le=3)
+    age: float = Field(ge=0.1667, le=80)
+    sibsp: int = Field(ge=0, le=8)
+    parch: int = Field(ge=0, le=9)
+    fare: float = Field(ge=0, le=512.3292)
+    sex: str = Field(pattern="^(male|female)$")
+    embarked: str = Field(pattern="^(S|C|Q)$")
+
 
 try:
     pipeline = joblib.load(MODEL_PATH)
@@ -38,6 +63,7 @@ FORM_HTML = """<!doctype html>
 <body>
     <h1>Titanic Prediction</h1>
     {message}
+    <p class="message" id="result-message" role="status" aria-live="polite" hidden></p>
     <form method="post" action="/predict">
         <label>Passenger class <output id="pclass-value" for="pclass">3</output>
             <input id="pclass" name="pclass" type="range" min="1" max="3" step="1" value="__PCLASS__" required>
@@ -75,10 +101,40 @@ FORM_HTML = """<!doctype html>
             field.addEventListener("input", updateValue);
             updateValue();
         }
-        document.querySelector("form").addEventListener("submit", () => {
+        document.querySelector("form").addEventListener("submit", async (event) => {
+            event.preventDefault();
             const button = document.querySelector('button[type="submit"]');
+            const message = document.getElementById("result-message");
             button.disabled = true;
             button.textContent = "Predicting...";
+            message.hidden = false;
+            message.textContent = "Predicting...";
+
+            const values = Object.fromEntries(new FormData(event.currentTarget));
+            for (const field of ["pclass", "age", "sibsp", "parch", "fare"]) {
+                values[field] = Number(values[field]);
+            }
+
+            try {
+                const response = await fetch("/predict", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(values)
+                });
+                const result = await response.json();
+                if (!response.ok) {
+                    const detail = Array.isArray(result.detail)
+                        ? result.detail.map(error => `${error.loc.at(-1)}: ${error.msg}`).join("; ")
+                        : result.detail;
+                    throw new Error(detail || "Prediction failed.");
+                }
+                message.textContent = `Prediction #${result.prediction_number} | Predicted class: ${result.prediction} (${result.survival}).`;
+            } catch (error) {
+                message.textContent = error.message || "Unable to get a prediction.";
+            } finally {
+                button.disabled = false;
+                button.textContent = "Predict";
+            }
         });
     </script>
 </body>
@@ -131,61 +187,12 @@ def prediction_form():
 
 
 @app.post("/predict")
-async def predict(request: Request):
+def predict(passenger_input: PassengerInput):
     global prediction_count
-    json_request = "application/json" in request.headers.get("content-type", "").lower()
-    if json_request:
-        try:
-            form_data = await request.json()
-            if not isinstance(form_data, dict):
-                raise ValueError
-        except ValueError:
-            return JSONResponse({"detail": "Request body must be a JSON object."}, status_code=400)
-        values = {field: str(form_data.get(field, "")) for field in FEATURE_COLUMNS}
-    else:
-        form_data = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
-        values = {field: form_data.get(field, [""])[0] for field in FEATURE_COLUMNS}
-
-    def invalid_input(message):
-        if json_request:
-            return JSONResponse({"detail": message}, status_code=400)
-        return render_page(message, status_code=400, values=values)
-
-    try:
-        pclass = int(values["pclass"])
-        age = float(values["age"])
-        sibsp = int(values["sibsp"])
-        parch = int(values["parch"])
-        fare = float(values["fare"])
-        sex = values["sex"]
-        embarked = values["embarked"]
-    except (KeyError, ValueError, IndexError):
-        return invalid_input("Enter valid values for every field.")
-
-    if not 1 <= pclass <= 3:
-        return invalid_input("Passenger class must be 1, 2, or 3.")
-    if not 0.1667 <= age <= 80:
-        return invalid_input("Age must be between 0.1667 and 80.")
-    if not 0 <= sibsp <= 8:
-        return invalid_input("Siblings/spouses must be between 0 and 8.")
-    if not 0 <= parch <= 9:
-        return invalid_input("Parents/children must be between 0 and 9.")
-    if not 0 <= fare <= 512.3292:
-        return invalid_input("Fare must be between 0 and 512.3292.")
-    if sex not in {"male", "female"}:
-        return invalid_input("Sex must be male or female.")
-    if embarked not in {"S", "C", "Q"}:
-        return invalid_input("Embarkation must be S, C, or Q.")
-
+    values = passenger_input.model_dump()
     # FEATURE_COLUMNS = FEATURE_COLUMNS + ['name', 'ticket', 'cabin', 'boat', 'home.dest', 'body']
     passenger = pd.DataFrame([{
-        "pclass": pclass,
-        "age": age,
-        "sibsp": sibsp,
-        "parch": parch,
-        "fare": fare,
-        "sex": sex,
-        "embarked": embarked,
+        **values,
         "name": "",
         "ticket": "",
         "cabin": "",
@@ -194,19 +201,14 @@ async def predict(request: Request):
         "body": ""
     }])
     
-    prediction = str(joblib.load(MODEL_PATH).predict(passenger)[0]).strip()
+    prediction = str(pipeline.predict(passenger)[0]).strip()
     prediction_count += 1
     is_survived = "Survived" if prediction == "1" else "Did Not Survive"
-    if json_request:
-        return JSONResponse({
-            "prediction": prediction,
-            "survival": is_survived,
-            "prediction_number": prediction_count,
-        })
-    result = (
-        f"Prediction #{prediction_count} | Predicted class: {prediction} ({is_survived})."
-    )
-    return render_page(result, values=values)
+    return {
+        "prediction": prediction,
+        "survival": is_survived,
+        "prediction_number": prediction_count,
+    }
 
 
 

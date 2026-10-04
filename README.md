@@ -16,7 +16,7 @@ This project serves a saved scikit-learn model through FastAPI. It predicts whet
 }
 ```
 
-Send it as JSON to `http://127.0.0.1:8000/predict` with `Content-Type: application/json`. The response includes the predicted class and its survival label. The browser form at `/` is also supported.
+Send it as JSON to `http://127.0.0.1:8000/predict` with `Content-Type: application/json`. The response includes the predicted class and its survival label. The browser form is available at `GET /predict`.
 
 ## Run locally (PowerShell)
 
@@ -28,4 +28,4 @@ python -m pip install -r requirements.txt
 python -m uvicorn main:app --reload
 ```
 
-Open <http://127.0.0.1:8000/> to use the form, or <http://127.0.0.1:8000/docs> to try the API. The UI code was generated with AI assistance.
+Open <http://127.0.0.1:8000/predict> to use the form, or <http://127.0.0.1:8000/docs> to try the API. The UI code was generated with AI assistance.
