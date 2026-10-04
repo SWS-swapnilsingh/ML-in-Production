@@ -181,7 +181,7 @@ def health():
     return {"status": "ok", "model_loaded": pipeline is not None}
 
 
-@app.get("/predict")
+@app.get("/predict", include_in_schema=False)
 def prediction_form():
     return render_page()
 
